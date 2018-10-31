@@ -1,0 +1,274 @@
+<pre class='metadata'>
+Title: std::forward from std::initializer_list
+Shortname: P1249
+Revision: 1
+Audience: EWGI
+Status: P
+Group: WG21
+URL: http://wg21.link/P1249r1
+!Source: <a href="https://github.com/achristensen07/papers/blob/master/source/P1249r1.bs">github.com/achristensen07/papers/blob/master/source/P1249r1.bs</a>
+Editor: Alex Christensen, Apple, achristensen@apple.com
+Abstract: Loosen const requirements of std::initializer_list to make it usable by non-copyable types.
+Date: 2018-10-31
+Markup Shorthands: markdown yes
+</pre>
+<pre class=biblio>
+{
+  "p0065": {
+    "authors": ["David Krauss"],
+    "href": "http://wg21.link/p0065",
+    "title": "Movable initializer lists, rev. 2",
+    "status": "P",
+    "publisher": "WG21"
+  }
+}
+</pre>
+Introduction and motivation:
+==========
+
+I often find myself writing templates that use `std::initializer_list` in the constructor, like this:
+
+```
+#include <memory>
+#include <initializer_list>
+
+template<typename T>
+class Vector {
+public:
+    Vector(std::initializer_list<T>&& list)
+        : buffer(std::make_unique<T[]>(list.size()))
+    {
+        for (auto&& element : list)
+            buffer[size++] = element;
+    }
+private:
+    size_t size { 0 };
+    std::unique_ptr<T[]> buffer;
+};
+
+void currentlyCompiles() {
+    Vector<int> v1({ 1, 2 });
+}
+```
+
+However, when I want to use non-copyable types, I can't:
+
+```
+void sadness() {
+    // error: object of type 'std::__1::unique_ptr<int, std::__1::default_delete<int> >'
+    // cannot be assigned because its copy assignment operator is implicitly deleted
+    //            buffer[size++] = element;
+    Vector<std::unique_ptr<int>> v2({ std::make_unique<int>(3),std::make_unique<int>(4) });
+}
+```
+
+This seems like something `std::forward` ought to solve, but if we add a `std::forward<T>` to the assignment in Vector's constructor, we get different errors:
+
+```
+error: no matching function for call to 'forward'
+            buffer[size++] = std::forward<T>(element);
+                             ^~~~~~~~~~~~~~~
+note: in instantiation of member function 'Vector<std::__1::unique_ptr<int, std::__1::default_delete<int> > >::Vector' requested here
+    Vector<std::unique_ptr<int>> v2({ std::make_unique<int>(3),std::make_unique<int>(4) });
+                                 ^
+note: candidate function not viable:
+      1st argument ('const std::__1::unique_ptr<int, std::__1::default_delete<int> >') would lose const qualifier
+forward(typename remove_reference<_Tp>::type& __t) _NOEXCEPT
+^
+note: candidate function not viable:
+      1st argument ('const std::__1::unique_ptr<int, std::__1::default_delete<int> >') would lose const qualifier
+forward(typename remove_reference<_Tp>::type&& __t) _NOEXCEPT
+```
+
+These errors are caused by the current definition of `std::initializer_list`, which defines its non-const iterators to be const.
+There is no direct workaround.  In order to get `initializer_list`-like behavior, we currently have to use variadic templates:
+
+```
+#include <memory>
+#include <initializer_list>
+
+template<typename T>
+class Vector {
+public:
+    Vector(std::initializer_list<T>&& list)
+        : buffer(std::make_unique<T[]>(list.size()))
+    {
+        for (auto&& element : list)
+            buffer[size++] = element;
+    }
+    template<typename... Elements>
+    static Vector<T> createFrom(Elements&&... elements)
+    {
+        Vector<T> vector;
+        vector.size = sizeof...(elements);
+        vector.buffer = std::make_unique<T[]>(vector.size);
+        vector.initialize<0>(std::forward<Elements>(elements)...);
+        return vector;
+    }
+private:
+    Vector() = default;
+    template<size_t index, typename Element, typename... RemainingElements>
+    void initialize(Element&& item, RemainingElements&&... remainingElements)
+    {
+        initialize<index>(std::forward<Element>(item));
+        initialize<index + 1>(std::forward<RemainingElements>(remainingElements)...);
+    }
+    template<size_t index, typename Element>
+    void initialize(Element&& value)
+    {
+        buffer[index] = std::forward<Element>(value);
+    }
+    size_t size { 0 };
+    std::unique_ptr<T[]> buffer;
+};
+
+void currentlyCompilesButUgly() {
+    Vector<int> v1({ 1, 2 });
+    auto v2 = Vector<std::unique_ptr<int>>::createFrom(
+        std::make_unique<int>(3),
+        std::make_unique<int>(4)
+    );
+}
+```
+
+Not only does this seem excessive in the definition of my Vector, but it also requires strange syntax when using my Vector with non-copyable types.
+But I would like to write code that uses `std::initializer_list` for all constructors, like this:
+
+```
+#include <memory>
+#include <initializer_list>
+
+template<typename T>
+class Vector {
+public:
+    Vector(std::initializer_list<T>&& list)
+        : buffer(std::make_unique<T[]>(list.size()))
+    {
+        for (auto&& element : list)
+            buffer[size++] = std::forward<T>(element);
+    }
+private:
+    size_t size { 0 };
+    std::unique_ptr<T[]> buffer;
+};
+
+void elegant() {
+    Vector<int> v1({ 1, 2 });
+    Vector<std::unique_ptr<int>> v2({ std::make_unique<int>(3),std::make_unique<int>(4) });
+}
+```
+
+This paper proposes changes to make this possible.
+
+Proposed changes:
+==========
+
+Section 9.3.4.5 should remove const as follows:
+<blockquote>
+An object of type std::initializer_list&lt;E&gl; is constructed from an initializer list as if the implementation generated
+and materialized (7.3.4) a prvalue of type “array of N <del>const</del> E”, where N is the number of elements in the initializer list.
+</blockquote>
+
+Section 16.10.1 should remove const as follows:
+
+<blockquote>
+namespace std {<br/>
+  template&lt;class E&gt; class initializer_list {<br/>
+  public:<br/>
+    using value_type = E;<br/>
+    using reference = <del>const</del> E&;<br/>
+    using const_reference = const E&;<br/>
+    using size_type = size_t;<br/>
+    using iterator = <del>const</del> E*;<br/>
+    using const_iterator = const E*;<br/>
+    constexpr initializer_list() noexcept;<br/>
+    constexpr size_t size() const noexcept;<br/>
+    constexpr <del>const</del> E* begin() const noexcept; // first element<br/>
+    constexpr <del>const</del> E* end() const noexcept; // one past the last element<br/>
+  };<br/>
+  // 16.10.4, initializer list range access<br/>
+  template&lt;class E&gt; constexpr <del>const</del> E* begin(initializer_list&lt;E&gt; il) noexcept;<br/>
+  template&lt;class E&gt; constexpr <del>const</del> E* end(initializer_list&lt;E&gt; il) noexcept;<br/>
+}
+</blockquote>
+
+Section 16.10.3 should remove const as follows:
+
+<blockquote>
+constexpr <del>const</del> E* begin() const noexcept;
+</blockquote>
+...
+<blockquote>
+constexpr <del>const</del> E* end() const noexcept;
+</blockquote>
+
+Section 16.10.4 should remove const as follows:
+<blockquote>
+template&lt;class E&gt; constexpr <del>const</del> E* begin(initializer_list&lt;E&gt; il) noexcept;
+</blockquote>
+...
+<blockquote>
+template&lt;class E&gt; constexpr <del>const</del> E* end(initializer_list&lt;E&gt; il) noexcept;
+</blockquote>
+
+Compatibility considerations:
+==========
+
+This change does not break binary compatibility, but it could possibly break source compatibility with code that does tricky things with types.  Consider the following example:
+
+```
+#include <memory>
+#include <iostream>
+#include <initializer_list>
+
+template<typename T>
+class Vector {
+public:
+    Vector(std::initializer_list<T>&& list)
+        : buffer(std::make_unique<T[]>(list.size()))
+    {
+        for (auto&& element : list) {
+            checkConst(element); // Calls a different function
+            buffer[size++] = element;
+        }
+    }
+private:
+    void checkConst(T&) { std::cout << "non-const" << std::endl; }
+    void checkConst(const T&) { std::cout << "const" << std::endl; }
+
+    size_t size { 0 };
+    std::unique_ptr<T[]> buffer;
+};
+
+int main() {
+    static_assert(std::is_const<typename std::remove_reference<typename std::initializer_list<T>::reference>::type>::value, ""); // Starts failing
+    Vector<int> v1({ 1, 2 });
+}
+```
+
+In practice, most uses of `std::initializer_list` do not do these things, and most const overloads used with `std::initializer_list` do the same thing as the non-const version.
+I believe compatibility issues with this change will be minimal and worth the benefits of future `std::initializer_list` use.
+In order to mitigate these compatibility concerns, we could add a feature test macro.
+
+Clang implementation notes:
+==========
+
+In addition to changing to the initializer_list header, clang currently requires
+loosening of a check in `AggExprEmitter::VisitCXXStdInitializerListExpr` in CGExprAgg.cpp
+or it will fail with this error:
+```
+error: cannot compile this weird std::initializer_list yet
+```
+
+Issue history
+==========
+This issue was reported before C++11 in [[N2801]] but nothing was done.
+[[p0065]] proposed a solution that was warmly received in straw polls, but more implementation experience was requested.
+It was assumed that `std::initializer` list could not be changed.
+This paper presents an alternative solution that trades some breakage for elegance with existing code and the existing library.
+It is unclear whether this elegance is worth the breakage or whether the approach froom [[p0065]] should be resumed with more implementation experience.
+
+Revision history:
+==========
+* r0 This paper was submitted to the 2018 San Diego mailing
+* r1 Based on pre-presentation feedback, the change to section 9.3.4.5 was added, the Issue history section was added, and the audience was changed to the newly formed EWGI
