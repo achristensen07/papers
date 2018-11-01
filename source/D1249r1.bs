@@ -3,7 +3,7 @@ Title: std::forward from std::initializer_list
 Shortname: P1249
 Revision: 1
 Audience: EWGI
-Status: P
+Status: D
 Group: WG21
 URL: http://wg21.link/P1249r1
 !Source: <a href="https://github.com/achristensen07/papers/blob/master/source/P1249r1.bs">github.com/achristensen07/papers/blob/master/source/P1249r1.bs</a>
@@ -266,7 +266,7 @@ This issue was reported before C++11 in [[N2801]] but nothing was done.
 [[p0065]] proposed a solution that was warmly received in straw polls, but more implementation experience was requested.
 It was assumed that `std::initializer` list could not be changed.
 This paper presents an alternative solution that trades some breakage for elegance with existing code and the existing library.
-It is unclear whether this elegance is worth the breakage or whether the approach froom [[p0065]] should be resumed with more implementation experience.
+It is unclear whether this elegance is worth the breakage or whether the non-breaking approach from [[p0065]] should be resumed with more implementation experience.
 
 Revision history:
 ==========
