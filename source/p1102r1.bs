@@ -1,0 +1,210 @@
+<pre class='metadata'>
+Title: Down with ()!
+Shortname: P1102
+Revision: 1
+Audience: CWG
+Status: P
+Group: WG21
+URL: http://wg21.link/P1102R1
+!Source: <a href="https://github.com/achristensen07/papers/blob/master/source/p1102r1.bs">https://github.com/achristensen07/papers/blob/master/source/p1102r1.bs</a>
+Editor: Alex Christensen, Apple, achristensen@apple.com
+Editor: JF Bastien, Toyota Research Institute—Advanced Development, cxx@jfbastien.com
+Abstract: A proposal for removing unnecessary ()'s from C++ lambdas.
+Date: 2020-11-12
+Markup Shorthands: markdown yes
+</pre>
+
+Introduction and motivation {#intro}
+===========================
+
+Currently, C++ lambdas with no parameters do not require a parameter declaration
+clause. The specification even contains this language in [**expr.prim.lambda**]
+section 8.4.5 ❡4:
+
+> If a lambda-expression does not include a lambda-declarator, it is as if the
+> lambda-declarator were `()`.
+
+This allows us to omit the unused `()` in simple lambdas such as this:
+
+<xmp>
+std::string s1 = "abc";
+auto withParen = [s1 = std::move(s1)] () {
+	std::cout << s1 << '\n'; 
+};
+
+std::string s2 = "abc";
+auto noSean = [s2 = std::move(s2)] { // Note no syntax error.
+	std::cout << s2 << '\n'; 
+};
+</xmp>
+
+These particular lambdas have ownership of the strings, so they ought to be able
+to mutate it, but `s1` and `s2` are const (because the `const` operator is
+declared `const` by default) so we need to add the `mutable` keyword:
+
+<xmp>
+std::string s1 = "abc";
+auto withParen = [s1 = std::move(s1)] () mutable {
+	s1 += "d";
+	std::cout << s1 << '\n'; 
+};
+
+std::string s2 = "abc";
+auto noSean = [s2 = std::move(s2)] mutable { // Currently a syntax error.
+	s2 += "d";
+	std::cout << s2 << '\n'; 
+};
+</xmp>
+
+Confusingly, the current Standard requires the empty parens when using the
+`mutable` keyword. This rule is unintuitive, causes common syntax errors, and
+clutters our code. When compiling with clang, we even get a syntax error that
+indicates the compiler knows exactly what is going on:
+
+<xmp>
+example.cpp:11:54: error: lambda requires '()' before 'mutable'
+auto noSean = [s2 = std::move(s2)] mutable { // Currently a syntax error.
+                                   ^
+                                   () 
+1 error generated.
+</xmp>
+
+This proposal would make these parentheses unnecessary like they were before we
+added `mutable`. This will apply to:
+
+  * lambda template parameters
+  * `constexpr`
+  * `mutable`
+  * Exception specifications and `noexcept`
+  * attributes
+  * trailing return types
+  * `requires`
+
+EWG discussed this change as [[EWG135]]
+in [Lenexa](http://wiki.edg.com/bin/view/Wg21lenexa/EWGIssuesResolutionMinutes)
+and voted 15 to 1 on forwarding to core. It became [[CWG2121]], discussed
+in
+[Kona](http://wiki.edg.com/bin/view/Wg21kona2015/CoreWorkingGroup#CWG_2121_More_flexible_lambda_sy) and
+needed someone to volunteer wording.
+
+This paper was discussed on the EWG reflector in June 2018, Nina Ranns provided
+feedback, and EWG chair agreed that the paper should move to CWG directly given
+previous polls.
+
+
+Impact {#impact}
+======
+
+This change will not break existing code.
+
+
+Wording {#word}
+=======
+
+Modify Lambda expressions [**expr.prim.lambda**] as follows:
+
+<blockquote>
+
+    <style>
+    indent1 { padding-left: 2em; }
+    indent2 { padding-left: 4em; }
+    indent3 { padding-left: 6em; }
+    </style>
+    <i>
+    
+    <indent1>lambda-expression :<br/></indent1>
+        <indent2>lambda-introducer <ins>lambda-parameter-list<sub>opt</sub></ins> <del>lambda-declarator<sub>opt</sub></del> <ins>lambda-specifiers</ins><br/></indent2>
+            <indent3>compound-statement<br/></indent3>
+        <indent2>lambda-introducer &lt; template-parameter-list &gt; requires-clause<sub>opt</sub><br/></indent2>
+            <indent3><ins>lambda-parameter-list-and-specifiers<sub>opt</sub></ins><del>lambda-declarator<sub>opt</sub></del> compound-statement<br/></indent3>
+    <indent1>lambda-introducer :<br/></indent1>
+        <indent2>[ lambda-capture<sub>opt</sub> ]<br/></indent2>
+    <indent1><ins>lambda-parameter-list :<br/></indent1>
+        <indent2><ins>( parameter-declaration-clause )</ins><br/></indent2>
+    <indent1><ins>lambda-parameter-list-and-specifiers :<br/></indent1>
+        <indent2><ins>lambda-parameter-list lambda-specifiers</ins><br/></indent2>
+    <indent1><del>lambda-declarator</del> <ins>lambda-specifiers</ins> :<br/></indent1>
+        <indent2><del>( parameter-declaration-clause )</del> decl-specifier-seq<sub>opt</sub><br/></indent2>
+            <indent3>noexcept-specifier<sub>opt</sub> attribute-specifier-seq<sub>opt</sub> trailing-return-type<sub>opt</sub> requires-clause<sub>opt</sub><br/></indent3>
+
+    </i>
+
+</blockquote>
+
+Because parts of *lambda-declarator* have been renamed to *lambda-parameter-list* and *lambda-specifiers*, each reference to *lambda-declarator* must be updated.<br/>
+
+Modify Function parameter scope [**basic.scope.param**] ❡1:
+
+<blockquote>
+  A function parameter (including one appearing in a <del>*lambda-declarator*</del> <ins>*lambda-parameter-list*</ins>) or
+  function-local predefined variable (9.5) has function parameter scope. [...]
+</blockquote>
+
+Modify Lambda expressions [**expr.prim.lambda.general**] ❡3:
+
+<blockquote>
+  In the *decl-specifier-seq* of the <del>*lambda-declarator*</del> <ins>*lambda-specifiers*</ins>,
+  each *decl-specifier* shall be one of `mutable`, `constexpr`, or `consteval`.
+</blockquote>
+
+Modify Lambda expressions [**expr.prim.lambda.general**] ❡4:
+
+<blockquote>
+  If a *lambda-expression* does not include a <del>*lambda-declarator*</del> <ins>lambda-parameter-list</ins>,
+  it is as if the <del>*lambda-declarator*</del> <ins>lambda-parameter-list</ins> were `()`. The lambda return type is
+  `auto`, which is replaced by the type specified by the *trailing-return-type* if
+  provided and/or deduced from `return` statements as described in 9.2.9.6.
+</blockquote>
+
+Modify Closure types [**expr.prim.lambda.closure**] ❡2 Note 1:
+
+<blockquote>
+  This determines the set of namespaces and classes associated with the closure type (6.5.3).
+  The parameter types of a <del>*lambda-declarator*</del> <ins>*lambda-parameter-list*</ins> do not affect these associated namespaces and classes.
+</blockquote>
+
+Modify Closure types [**expr.prim.lambda.closure**] ❡3:
+
+<blockquote>
+  [...] The trailing *requires-clause* of
+  the function call operator or operator template is the *requires-clause*
+  following the <del>*lambda-declarator*</del> <ins>*lambda-parameter-list*</ins>, if any.
+</blockquote>
+
+Modify Closure types [**expr.prim.lambda.closure**] ❡4:
+
+<blockquote>
+  [...] An *attribute-specifier-seq* in a <del>*lambda-declarator*</del> <ins>*lambda-specifiers*</ins> appertains to the type of the corresponding function call operator or operator template. [...]
+</blockquote>
+
+Modify Closure types [**expr.prim.lambda.closure**] ❡4 Note 3:
+
+<blockquote>
+  Names referenced in the <del>*lambda-declarator*</del> <ins>*lambda-parameter-list*</ins> are looked up in the context in which the *lambda-expression* appears.
+</blockquote>
+
+Modify Captures [**expr.prim.lambda.capture**] ❡5:
+
+<blockquote>
+  If an *identifier* in a *simple-capture* appears as the *declarator-id* of a parameter of the
+  <del>*lambda-declarator*</del> <ins>*lambda-parameter-list*</ins>’s *parameter-declaration-clause*, the program is ill-formed.
+</blockquote>
+
+Modify Default arguments [**dcl.fct.default**] ❡3:
+
+<blockquote>
+  A default argument shall be specified only in the *parameter-declaration-clause* of a function declaration
+  or <del>*lambda-declarator*</del> <ins>*lambda-parameter-list*</ins> or in a *template-parameter* (13.2); in the latter case, the *initializer-clause* shall be an
+  *assignment-expression*. [...]
+</blockquote>
+
+Modify Name resolution [**temp.res.general**] ❡5.2.5:
+
+<blockquote>
+  *parameter-declaration* in a <del>*lambda-declarator*</del> <ins>*lambda-parameter-list*</ins> or *requirement-parameter-list*, unless that *parameter-declaration* appears in a default argument, or
+</blockquote>
+
+Version History {#history}
+=======
+r0: Initial proposal<br/>
+r1: Respond to feedback about ambiguous requires-clauses from Hubert Tong
