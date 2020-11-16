@@ -10,7 +10,7 @@ URL: http://wg21.link/P1102R1
 Editor: Alex Christensen, Apple, achristensen@apple.com
 Editor: JF Bastien, Toyota Research Institute—Advanced Development, cxx@jfbastien.com
 Abstract: A proposal for removing unnecessary ()'s from C++ lambdas.
-Date: 2020-11-12
+Date: 2020-11-16
 Markup Shorthands: markdown yes
 </pre>
 
@@ -206,5 +206,5 @@ Modify Name resolution [**temp.res.general**] ❡5.2.5:
 
 Version History {#history}
 =======
-r0: Initial proposal<br/>
+r0: Initial proposal, picking up from [[CWG2121]], discussed on reflector 6 July, 2018<br/>
 r1: Respond to feedback about ambiguous requires-clauses from Hubert Tong
