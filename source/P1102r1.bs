@@ -1,5 +1,5 @@
 <pre class='metadata'>
-Title: Down with ()!
+Title: Down with <code>()</code>!
 Shortname: P1102
 Revision: 1
 Audience: CWG
@@ -9,10 +9,26 @@ URL: http://wg21.link/P1102R1
 !Source: <a href="https://github.com/achristensen07/papers/blob/master/source/p1102r1.bs">https://github.com/achristensen07/papers/blob/master/source/p1102r1.bs</a>
 Editor: Alex Christensen, Apple, achristensen@apple.com
 Editor: JF Bastien, Toyota Research Institute—Advanced Development, cxx@jfbastien.com
-Abstract: A proposal for removing unnecessary ()'s from C++ lambdas.
+Abstract: A proposal for removing unnecessary <code>()</code>'s from C++ lambdas.
 Date: 2020-11-16
 Markup Shorthands: markdown yes
 </pre>
+
+Revision History {#history}
+================
+
+EWG discussed this change as [[EWG135]] in
+[Lenexa](http://wiki.edg.com/bin/view/Wg21lenexa/EWGIssuesResolutionMinutes) and
+voted 15 to 1 on forwarding to core. It became [[CWG2121]], discussed in
+[Kona](http://wiki.edg.com/bin/view/Wg21kona2015/CoreWorkingGroup#CWG_2121_More_flexible_lambda_sy)
+and needed someone to volunteer wording.
+
+[[P1102R0]] was published in June 2018. It was discussed on the EWG reflector in
+June 2018, Nina Ranns provided feedback, and EWG chair agreed that the paper
+should move to CWG directly given previous polls.
+
+P1102R1 responds to feedback about ambiguous requires-clauses from Hubert Tong.
+
 
 Introduction and motivation {#intro}
 ===========================
@@ -61,7 +77,7 @@ Confusingly, the current Standard requires the empty parens when using the
 clutters our code. When compiling with clang, we even get a syntax error that
 indicates the compiler knows exactly what is going on:
 
-<xmp>
+<xmp highlight='shell'>
 example.cpp:11:54: error: lambda requires '()' before 'mutable'
 auto noSean = [s2 = std::move(s2)] mutable { // Currently a syntax error.
                                    ^
@@ -79,18 +95,6 @@ added `mutable`. This will apply to:
   * attributes
   * trailing return types
   * `requires`
-
-EWG discussed this change as [[EWG135]]
-in [Lenexa](http://wiki.edg.com/bin/view/Wg21lenexa/EWGIssuesResolutionMinutes)
-and voted 15 to 1 on forwarding to core. It became [[CWG2121]], discussed
-in
-[Kona](http://wiki.edg.com/bin/view/Wg21kona2015/CoreWorkingGroup#CWG_2121_More_flexible_lambda_sy) and
-needed someone to volunteer wording.
-
-This paper was discussed on the EWG reflector in June 2018, Nina Ranns provided
-feedback, and EWG chair agreed that the paper should move to CWG directly given
-previous polls.
-
 
 Impact {#impact}
 ======
@@ -203,8 +207,3 @@ Modify Name resolution [**temp.res.general**] ❡5.2.5:
 <blockquote>
   *parameter-declaration* in a <del>*lambda-declarator*</del> <ins>*lambda-parameter-list*</ins> or *requirement-parameter-list*, unless that *parameter-declaration* appears in a default argument, or
 </blockquote>
-
-Version History {#history}
-=======
-r0: Initial proposal, picking up from [[CWG2121]], discussed on reflector 6 July, 2018<br/>
-r1: Respond to feedback about ambiguous requires-clauses from Hubert Tong
