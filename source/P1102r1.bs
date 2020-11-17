@@ -6,7 +6,7 @@ Audience: CWG
 Status: P
 Group: WG21
 URL: http://wg21.link/P1102R1
-!Source: <a href="https://github.com/achristensen07/papers/blob/master/source/p1102r1.bs">https://github.com/achristensen07/papers/blob/master/source/p1102r1.bs</a>
+!Source: <a href="https://github.com/achristensen07/papers/blob/master/source/P1102r1.bs">https://github.com/achristensen07/papers/blob/master/source/P1102r1.bs</a>
 Editor: Alex Christensen, Apple, achristensen@apple.com
 Editor: JF Bastien, Toyota Research Institute—Advanced Development, cxx@jfbastien.com
 Abstract: A proposal for removing unnecessary <code>()</code>'s from C++ lambdas.
