@@ -21,7 +21,7 @@ EWG discussed this change as [[EWG135]] in
 [Lenexa](http://wiki.edg.com/bin/view/Wg21lenexa/EWGIssuesResolutionMinutes) and
 voted 15 to 1 on forwarding to core. It became [[CWG2121]], discussed in
 [Kona](http://wiki.edg.com/bin/view/Wg21kona2015/CoreWorkingGroup#CWG_2121_More_flexible_lambda_sy)
-and needed someone to volunteer wording.
+and needed someone to volunteer wording.  This paper presents text that implements that decision, for consideration.
 
 [[P1102R0]] was published in June 2018. It was discussed on the EWG reflector in
 June 2018, Nina Ranns provided feedback, and EWG chair agreed that the paper
