@@ -1,0 +1,144 @@
+<pre class='metadata'>
+Title: Down with ()!
+Shortname: P1102
+Revision: 2
+Audience: CWG
+Status: P
+Group: WG21
+URL: http://wg21.link/P1102R2
+!Source: <a href="https://github.com/achristensen07/papers/blob/master/source/P1102r2.bs">https://github.com/achristensen07/papers/blob/master/source/P1102r2.bs</a>
+Editor: Alex Christensen, Apple, achristensen@apple.com
+Editor: JF Bastien, Toyota Research Institute—Advanced Development, cxx@jfbastien.com
+Abstract: A proposal for removing unnecessary <code>()</code>'s from C++ lambdas.
+Date: 2020-12-11
+Markup Shorthands: markdown yes
+</pre>
+
+Revision History {#history}
+================
+
+EWG discussed this change as [[EWG135]] in
+[Lenexa](http://wiki.edg.com/bin/view/Wg21lenexa/EWGIssuesResolutionMinutes) and
+voted 15 to 1 on forwarding to core. It became [[CWG2121]], discussed in
+[Kona](http://wiki.edg.com/bin/view/Wg21kona2015/CoreWorkingGroup#CWG_2121_More_flexible_lambda_sy)
+and needed someone to volunteer wording.  This paper presents text that implements that decision, for consideration.
+
+[[P1102R0]] was published in June 2018. It was discussed on the EWG reflector in
+June 2018, Nina Ranns provided feedback, and EWG chair agreed that the paper
+should move to CWG directly given previous polls.
+
+[[P1102R1]] responded to feedback about ambiguous requires-clauses from Hubert Tong and was discussed in a CWG teleconference on 2020-12-07.
+
+P1102R2 incorporates the feedback given by CWG during that teleconference.
+
+Introduction and motivation {#intro}
+===========================
+
+Currently, C++ lambdas with no parameters do not require a parameter declaration
+clause. The specification even contains this language in [**expr.prim.lambda**]
+section 8.4.5 ❡4:
+
+> If a lambda-expression does not include a lambda-declarator, it is as if the
+> lambda-declarator were `()`.
+
+This allows us to omit the unused `()` in simple lambdas such as this:
+
+<xmp>
+std::string s1 = "abc";
+auto withParen = [s1 = std::move(s1)] () {
+	std::cout << s1 << '\n'; 
+};
+
+std::string s2 = "abc";
+auto noSean = [s2 = std::move(s2)] { // Note no syntax error.
+	std::cout << s2 << '\n'; 
+};
+</xmp>
+
+These particular lambdas have ownership of the strings, so they ought to be able
+to mutate it, but `s1` and `s2` are const (because the `const` operator is
+declared `const` by default) so we need to add the `mutable` keyword:
+
+<xmp>
+std::string s1 = "abc";
+auto withParen = [s1 = std::move(s1)] () mutable {
+	s1 += "d";
+	std::cout << s1 << '\n'; 
+};
+
+std::string s2 = "abc";
+auto noSean = [s2 = std::move(s2)] mutable { // Currently a syntax error.
+	s2 += "d";
+	std::cout << s2 << '\n'; 
+};
+</xmp>
+
+Confusingly, the current Standard requires the empty parens when using the
+`mutable` keyword. This rule is unintuitive, causes common syntax errors, and
+clutters our code. When compiling with clang, we even get a syntax error that
+indicates the compiler knows exactly what is going on:
+
+<xmp highlight='shell'>
+example.cpp:11:54: error: lambda requires '()' before 'mutable'
+auto noSean = [s2 = std::move(s2)] mutable { // Currently a syntax error.
+                                   ^
+                                   () 
+1 error generated.
+</xmp>
+
+This proposal would make these parentheses unnecessary like they were before we
+added `mutable`. This will apply to:
+
+  * lambda template parameters
+  * `constexpr`
+  * `mutable`
+  * `consteval`
+  * Exception specifications and `noexcept`
+  * attributes
+  * trailing return types
+  * `requires`
+
+Impact {#impact}
+======
+
+This change will not break existing code.
+
+
+Wording {#word}
+=======
+
+Modify Lambda expressions [**expr.prim.lambda**] as follows:
+
+<blockquote>
+
+    <style>
+    indent1 { padding-left: 2em; }
+    indent2 { padding-left: 4em; }
+    indent3 { padding-left: 6em; }
+    </style>
+    <i>
+    
+    <indent1>lambda-expression :<br/></indent1>
+        <indent2>lambda-introducer lambda-declarator<del><sub>opt</sub></del> compound-statement<br/></indent2>
+        <indent2>lambda-introducer &lt; template-parameter-list &gt; requires-clause<sub>opt</sub><br/></indent2>
+            <indent3>lambda-declarator<del><sub>opt</sub></del> compound-statement<br/></indent3>
+    <indent1>lambda-introducer :<br/></indent1>
+        <indent2>[ lambda-capture<sub>opt</sub> ]<br/></indent2>
+    <indent1>lambda-declarator:<br/></indent1>
+		<indent2><ins>lambda-specifiers</ins><br/></indent2>
+        <indent2>( parameter-declaration-clause ) <del>decl-specifier-seq<sub>opt</sub></del> <ins>lambda-specifiers</ins><br/></indent2>
+            <indent3><del>noexcept-specifier<sub>opt</sub> attribute-specifier-seq<sub>opt</sub> trailing-return-type<sub>opt</sub></del> requires-clause<sub>opt</sub><br/></indent3>
+    <indent1><ins>lambda-specifiers:</ins><br/></indent1>
+	    <indent2><ins>decl-specifier-seq<sub>opt</sub>noexcept-specifier<sub>opt</sub> attribute-specifier-seq<sub>opt</sub> trailing-return-type<sub>opt</sub></ins><br/></indent2>
+    </i>
+
+</blockquote>
+
+The <sub>opt</sub> after *lambda-declarator* is removed because *lambda-declarator* can now be empty and the <sub>opt</sub> would be redundant.
+*lambda-specifiers* is given a name to reduce redunancy in the grammar.
+
+Modify ❡4 to clarify that all *lambda-expressions* now have a *lambda-declarator* but it may be empty:
+
+<blockquote>
+If a *lambda-expression* <del>does not include a</del><ins>includes an empty</ins> *lambda-declarator*, it is as if the *lambda-declarator* were `()`. [...]
+</blockquote>
