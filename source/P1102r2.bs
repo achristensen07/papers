@@ -8,7 +8,7 @@ Group: WG21
 URL: http://wg21.link/P1102R2
 !Source: <a href="https://github.com/achristensen07/papers/blob/master/source/P1102r2.bs">https://github.com/achristensen07/papers/blob/master/source/P1102r2.bs</a>
 Editor: Alex Christensen, Apple, achristensen@apple.com
-Editor: JF Bastien, Toyota Research Institute—Advanced Development, cxx@jfbastien.com
+Editor: JF Bastien, Toyota Research Institute—Advanced Development (Woven Planet), cxx@jfbastien.com
 Abstract: A proposal for removing unnecessary <code>()</code>'s from C++ lambdas.
 Date: 2020-12-11
 Markup Shorthands: markdown yes
@@ -29,7 +29,7 @@ should move to CWG directly given previous polls.
 
 [[P1102R1]] responded to feedback about ambiguous requires-clauses from Hubert Tong and was discussed in a CWG teleconference on 2020-12-07.
 
-P1102R2 incorporates the feedback given by CWG during that teleconference.
+P1102R2 incorporates the feedback given by CWG during <a href="https://wiki.edg.com/bin/view/Wg21fall2020/IssuesProcessingTeleconference2020-12-07">the 2020-12-07 teleconference</a>.
 
 Introduction and motivation {#intro}
 ===========================
