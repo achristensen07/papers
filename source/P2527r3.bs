@@ -1,0 +1,369 @@
+<pre class='metadata'>
+Title: std::variant_alternative_index and std::tuple_element_index
+Shortname: P2527
+Revision: 3
+Audience: LEWG
+Status: P
+Group: WG21
+URL: https://wg21.link/P2527R3
+!Source: <a href="https://github.com/achristensen07/papers/blob/main/source/P2527r3.bs">https://github.com/achristensen07/papers/blob/main/source/P2527r3.bs</a>
+Editor: Alex Christensen, Apple, achristensen@apple.com
+Abstract: A description of std::variant_alternative_index, std::variant_alternative_index_v, std::tuple_element_index, and std::tuple_element_index_v which polish use of std::variant and std::tuple in C++.
+Date: 2023-12-20
+Markup Shorthands: markdown yes
+</pre>
+
+Introduction {#intro}
+===========================
+
+`std::variant` and `std::tuple` seem have a missing piece.
+`std::get` and `std::get_if` can be used with an index or with a type.
+There is already a way to get a type from an index (`std::variant_alternative` and `std::tuple_element`)
+but there is no way to get an index from a type.  This adds such a mechanism.
+
+Revision History
+==========
+* r0 Initial version, discussed in the C++ Library Evolution Working Group email list June 27, 2022 through July 13, 2022.  This version of the paper was also incorrectly dated 2021-01-18 instead of 2022-01-18.
+* r1 Responded to LEWG email feedback by adding std::tuple_element_index_v, inheriting from std::integral_constant, clarifying what happens with structs and classes that inherit from std::tuple and std::variant, clarifying what happens with const template parameters, adding spec wording, and possible implementation.
+* r2 As requested by LEWG, did some wordsmithing to refine the language of the spec addition with help from Daniel Krügler.
+* r3 Responded to feedback from LWG discussing this in Kona on 9 Nov 2023 by removing the const versions.  Added questions for LEWG.  Updated "possible implementation" section.  Replaced "(21.3.2)" with "[meta.rqmts]" in wording additions.
+
+Questions for LEWG from LWG {#lwgquestions}
+===========================
+
+1. Currently proposed wording uses "Mandates" which makes it a compiler error to have a type that is not present in the list of types exactly once.  This matches `std::get` but it is not the only possible failure mode.  We could change it to "Constraints" which would make it more SFINAE-friendly, which could match a possible future `std::get` after a change like <a href='https://wg21.link/P0825'>P0825</a>.  We could also change the failure mode to do something like returning -1, `std::tuple_size` or `std::variant_size`, or another out-of-bounds value if the type is not found or found multiple times.  What should we do? A. Keep "Mandates", B. Switch to "Constraints", or C. Switch to out-of-bounds integers as failure modes
+
+2. The current proposed addition of helpers to `std::variant` and `std::tuple` makes `std::tuple` look more like `std::variant` and less like the other tuple-like types (`std::complex`, `std::array`, `std::pair`, and `std::ranges::subrange`).  This does not follow the existing pattern established by `std::tuple_size` and `std::tuple_element` of being able to write generic templates that handle any tuple-like type.  What should we do? A. Add `std::tuple_element_index` for the other tuple-like types, B. Remove `std::tuple_element_index` entirely, or C. Keep the existing proposal of only adding to `std::variant` and `std::tuple`
+
+Motivating Use Case: Migrating C code to use `std::variant` {#migration}
+===========================
+
+Consider the following C program with a unit test:
+
+<xmp>
+#include <assert.h>
+
+struct NumberStorage {
+    enum Type { TYPE_INT, TYPE_DOUBLE } type;
+    union {
+        int i;
+        double d;
+    };
+};
+
+struct NumberStorage packageInteger(int i) {
+    struct NumberStorage packaged;
+    packaged.type = TYPE_INT;
+    packaged.i = i;
+    return packaged;
+}
+
+int main() {
+    struct NumberStorage i = packageInteger(5);
+    assert(i.type == TYPE_INT);
+}
+</xmp>
+
+In order to migrate it from using a `union` to using a `std::variant` one of the cleanest solutions looks something like this:
+
+<xmp>
+#include <assert.h>
+#include <variant>
+
+// Dear future developers: VariantIndex and NumberStorage must stay in sync.
+// If you reorder or add to one, you must do the same to the other.
+enum class VariantIndex : std::size_t { Int, Double };
+using NumberStorage = std::variant<int, double>;
+
+NumberStorage packageInteger(int i) {
+    return { i };
+}
+
+int main() {
+    auto i = packageInteger(5);
+    auto expectedIndex = static_cast<std::size_t>(VariantIndex::Int);
+    assert(i.index() == expectedIndex);
+}
+
+</xmp>
+
+Instead, using `std::variant_alternative_index_v` would make the code look cleaner and be easier to maintain:
+
+<xmp>
+#include <assert.h>
+#include <variant>
+
+using NumberStorage = std::variant<int, double>;
+
+NumberStorage packageInteger(int i) {
+    return { i };
+}
+
+int main() {
+    auto i = packageInteger(5);
+    auto expectedIndex = std::variant_alternative_index_v<int, NumberStorage>;
+    assert(i.index() == expectedIndex);
+}
+</xmp>
+
+Motivating Use Case: Simple object serialization {#serialization}
+===========================
+
+Another place where `std::variant_alternative_index_v` is useful is when we have an index from a source such as deserialization and we want to decide what type it represents without using any magic numbers:
+
+<xmp>
+
+struct Reset { };
+struct Close { };
+struct RunCommand { std::string command; };
+
+using Action = std::variant<Reset, Close, RunCommand>;
+
+void serializeAction(const Action& action, std::vector<uint8_t>& buffer)
+{
+    buffer.push_back(action.index());
+    if (auto* runCommand = std::get_if<RunCommand>(&action))
+        serializeString(runCommand->command, buffer);
+}
+
+std::optional<Action> deserializeAction(std::span<const uint8_t> source)
+{
+    if (!source.size())
+        return std::nullopt;
+
+    switch (source[0]) {
+    case std::variant_alternative_index_v<Reset, Action>:
+        return Reset { };
+    case std::variant_alternative_index_v<Close, Action>:
+        return Close { };
+    case std::variant_alternative_index_v<RunCommand, Action>:
+        return RunCommand { deserializeString(source.subspan(1)) };
+    }
+
+    return std::nullopt;
+}
+</xmp>
+
+Like the other motivating use case, this could be done with an enum class or `#define RESET_INDEX 0` etc., but this is nicer and references the variant instead of requiring parallel metadata.  This was the use case that motivated an implementation in <a href="https://trac.webkit.org/changeset/285350/webkit/trunk/Source/WTF/wtf/StdLibExtras.h">WebKit</a>.
+
+Motivation For `std::tuple_element_index_v` {#tuple_motivation}
+===========================
+Feedback from r0 indicated that while adding std::variant_alternative_index_v for variants, it would be symmetric to add std::tuple_element_index_v for tuples.
+
+Ill-formed use examples {#illformed}
+===========================
+
+Like the versions of `std::get` that take a type, the program must be ill formed if the type is not a unique element in the types of the `std::variant` or `std::tuple` such as in these four cases:
+
+<xmp>
+using Example1 = std::variant<int, double, double>;
+auto ambiguous1 = std::variant_alternative_index_v<double, Example1>;
+
+using Example2 = std::variant<int, double>;
+auto missing2 = std::variant_alternative_index_v<float, Example2>;
+
+using Example3 = std::tuple<int, double, double>;
+auto ambiguous3 = std::tuple_element_index_v<double, Example3>;
+
+using Example4 = std::tuple<int, double>;
+auto missing4 = std::tuple_element_index_v<float, Example4>;
+</xmp>
+
+If the constness of the searched-for type does not match the constness of the type in the `std::variant` or `std::tuple` then there should be a compiler error.  This is also the case with `std::get`.
+
+<xmp>
+using Example5 = std::variant<int, double>;
+auto constDoesNotMatch5 = std::variant_alternative_index_v<const int, Example5>;
+
+using Example6 = std::tuple<int, double>;
+auto constDoesNotMatch6 = std::tuple_element_index_v<const int, Example6>;
+</xmp>
+
+Like `std::variant_size` and `std::tuple_size` there should be a compiler error if `std::variant_alternative_index` or `std::tuple_element_index_v` are used with classes or structs that are not `std::variant`s or `std::tuple`s, respectively, including classes or structs that inherit from `std::variant` or `std::tuple`.
+
+<xmp>
+class Example7 : public std::variant<int, double> { };
+auto nonVariantParameter7 = std::variant_alternative_index_v<int, Example7>;
+auto nonVariantParameter8 = std::variant_altermative_index_v<int Example4>;
+
+class Example9 : public std::tuple<int, double> { };
+auto nonTupleParameter9 = std::tuple_element_index_v<int, Example9>;
+auto nonTupleParameter10 = std::tuple_element_index_v<int, Example2>;
+</xmp>
+
+If the type of `std::variant` or `std::tuple` is const, then there should be a compiler error.  This is not the case with `std::variant_size` or `std::tuple_size`.
+
+<xmp>
+using Example10 = std::variant<int, double>;
+auto variantCantBeConst = std::variant_alternative_index_v<int, const Example10>;
+
+using Example11 = std::tuple<int, double>;
+auto tupleCantBeConst = std::tuple_element_index_v<int, const Example11>;
+</xmp>
+
+Proposed Wording {#word}
+===========================
+<style>
+    indent1 { padding-left: 2em; }
+    indent2 { padding-left: 4em; }
+</style>
+
+These changes are based on the <a href="https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2023/n4928.pdf">Working Draft, Standard for Programming Language C++</a> from 2022-12-18<br/>
+
+Modify <b>Header &lt;tuple&gt; synopsis</b> [**tuple.syn**] as follows:
+<blockquote>
+[...]<br/>
+<i>`// 22.4.7, tuple helper classes`</i><br/>
+`template<class T> struct tuple_size;`<indent1><i>`// not defined`</i></indent1><br/>
+<br/>
+`template<class... Types> struct tuple_size<tuple<Types...>>;`<br/>
+<br/>
+`template<size_t I, class T> struct tuple_element;`<indent1><i>`// not defined`</i></indent1><br/>
+<br/>
+`template<size_t I, class... Types>`<br/>
+<indent1>`struct tuple_element<I, tuple<Types...>>;`</indent1><br/>
+<br/>
+`template<size_t I, class T>`<br/>
+<indent1>`using tuple_element_t = typename tuple_element<I, T>::type;`</indent1><br/>
+<ins>
+<br/>
+`template<class T, class Tuple> struct tuple_element_index;`<indent1><i>`// not defined`</i></indent1><br/>
+<br/>
+`template<class T, class... Types> struct tuple_element_index<T, tuple<Types...>>;`<br/>
+<br/>
+`template<class T, class Tuple> constexpr size_t tuple_element_index_v`<br/>
+<indent1>`= tuple_element_index<T, Tuple>::value;`</indent1><br/>
+</ins>
+<br/>
+<i>`// 22.4.8, element access`<br/></i>
+[...]
+</blockquote>
+
+Modify <b>Tuple helper classes</b> [**tuple.helper**] as follows:
+<blockquote>
+[...]<br/>
+`template<size_t I, class T> struct tuple_element<I, const T>;`<br/>
+<indent2>Let `TE` denote `tuple_element_t<I, T>` of the cv-unqualified type `T`. Then each specialization of the template meets the <i>Cpp17TransformationTrait</i> requirements (21.3.2) with a member typedef `type` that names the type `add_const_t<TE>`.</indent2><br/>
+<indent2>In addition to being available via inclusion of the `<tuple>` header, the template is available when any of the headers `<array>` (24.3.2), `<ranges>` (26.2), or `<utility>` (22.2.1) are included.</indent2><br/>
+<ins>
+`template<class T, class Tuple> struct tuple_element_index;`<br/>
+<indent2>All specializations of `tuple_element_index` meet the <i>Cpp17BinaryTypeTrait</i> requirements [meta.rqmts] with a base characteristic of `integral_constant<size_t, N>` for some `N`.</indent2><br/>
+`template<class T, class... Types> struct tuple_element_index<T, tuple<Types...>>`<br/>
+<indent1>`: integral_constant<size_t, N> { };`</indent1><br/>
+<indent2><i>Mandates</i>: The type `T` occurs exactly once in `Types`.</indent2><br/>
+<indent2>`N` is the zero-based index of `T` in `Types`.</indent2><br/>
+</ins>
+</blockquote>
+
+Modify <b>Header &lt;variant&gt; synopsis</b> [**variant.syn**] as follows:
+<blockquote>
+`#include <compare>`<indent1><i>`// see 17.11.1`</i></indent1><br/>
+`namespace std {`<br/>
+<i>`// 22.6.3, class template variant`</i><br/>
+`template<class... Types>`<br/>
+<indent1>`class variant;`<br/>
+<br/>
+<i>`// 22.6.4, variant helper classes`</i><br/>
+`template<class T> struct variant_size;`<indent1><i>`// not defined`</i></indent1><br/>
+`template<class T> struct variant_size<const T>;`<br/>
+`template<class T>`<br/>
+<indent1>`inline constexpr size_t variant_size_v = variant_size<T>::value;`<br/>
+<br/>
+`template<class... Types>`<br/>
+<indent1>`struct variant_size<variant<Types...>>;`<br/>
+<br/>
+`template<size_t I, class T> struct variant_alternative;`<indent1><i>`// not defined`</i></indent1><br/>
+`template<size_t I, class T> struct variant_alternative<I, const T>;`<br/>
+`template<size_t I, class T>`<br/>
+<indent1>`using variant_alternative_t = typename variant_alternative<I, T>::type;`<br/>
+<br/>
+`template<size_t I, class... Types>`<br/>
+<indent1>`struct variant_alternative<I, variant<Types...>>;`<br/>
+<br/>
+<ins>
+`template<class T, class Variant> struct variant_alternative_index;`<indent1><i>`// not defined`</i></indent1><br/>
+`template<class T, class Variant> constexpr size_t variant_alternative_index_v`<br/>
+<indent1>`= variant_alternative_index<T, Variant>::value;`<br/>
+<br/>
+`template<class T, class... Types>`<br/>
+<indent1>`struct variant_alternative_index<T, variant<Types...>>;`<br/>
+</ins>
+<br/>
+`inline constexpr size_t variant_npos = -1;`<br/>
+[...]<br/>
+</blockquote>
+
+Modify <b>variant helper classes</b> [**variant.helper**] as follows:
+<blockquote>
+[...]<br/>
+`variant_alternative<I, variant<Types...>>::type`<br/>
+<indent2><i>Mandates</i>: `I` &lt; `sizeof...(Types)`.</indent2><br/>
+<indent2><i>Type</i>: The type `T`<sub><i>I</i></sub>.</indent2><br/>
+<br/>
+<ins>
+`template<class T, class Variant> struct variant_alternative_index;`<br/>
+<indent2>All specializations of `variant_alternative_index` meet the <i>Cpp17BinaryTypeTrait</i> requirements [meta.rqmts] with a base characteristic of `integral_constant<size_t, N>` for some `N`.</indent2><br/>
+`template<class T, class... Types> struct variant_alternative_index<T, variant<Types...>>`<br/>
+<indent1>`: integral_constant<size_t, N> { };`<br/>
+<indent2><i>Mandates</i>: The type `T` occurs exactly once in `Types`.</indent2><br/>
+<indent2>`N` is the zero-based index of `T` in `Types`.</indent2><br/>
+</ins>
+</blockquote>
+
+Appendix A: possible implementation {#possible_implementation}
+===========================
+<xmp>
+namespace std {
+
+namespace detail {
+
+template<size_t, class, class> struct alternative_index_helper;
+
+template<size_t index, class Type, class T>
+struct alternative_index_helper<index, Type, variant<T>> {
+    static constexpr size_t count = is_same_v<Type, T>;
+    static constexpr size_t value = index;
+};
+
+template<size_t index, class Type, class T, class... Types>
+struct alternative_index_helper<index, Type, variant<T, Types...>> {
+    static constexpr size_t count = is_same_v<Type, T> + alternative_index_helper<index + 1, Type, variant<Types...>>::count;
+    static constexpr size_t value = is_same_v<Type, T> ? index : alternative_index_helper<index + 1, Type, variant<Types...>>::value;
+};
+
+template<size_t, class, class> struct tuple_element_helper;
+
+template<size_t index, class Type, class T>
+struct tuple_element_helper<index, Type, tuple<T>> {
+    static constexpr size_t count = is_same_v<Type, T>;
+    static constexpr size_t value = index;
+};
+
+template<size_t index, class Type, class T, class... Types>
+struct tuple_element_helper<index, Type, tuple<T, Types...>> {
+    static constexpr size_t count = is_same_v<Type, T> + tuple_element_helper<index + 1, Type, tuple<Types...>>::count;
+    static constexpr size_t value = is_same_v<Type, T> ? index : tuple_element_helper<index + 1, Type, tuple<Types...>>::value;
+};
+
+} // namespace detail
+
+template<class T, class Variant> struct variant_alternative_index;
+
+template<class T, class Variant> struct variant_alternative_index
+    : integral_constant<size_t, detail::alternative_index_helper<0, T, Variant>::value> {
+    static_assert(detail::alternative_index_helper<0, T, Variant>::count == 1);
+};
+
+template<class T, class Variant> constexpr size_t variant_alternative_index_v = variant_alternative_index<T, Variant>::value;
+
+template<class T, class Tuple> struct tuple_element_index;
+
+template<class T, class Tuple> struct tuple_element_index
+    : integral_constant<size_t, detail::tuple_element_helper<0, T, Tuple>::value> {
+    static_assert(detail::tuple_element_helper<0, T, Tuple>::count == 1);
+};
+
+template<class T, class Tuple> constexpr size_t tuple_element_index_v = tuple_element_index<T, Tuple>::value;
+
+} // namespace std
+</xmp>
