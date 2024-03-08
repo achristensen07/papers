@@ -1,0 +1,1287 @@
+<pre class='metadata'>
+Title: Secure Networking in C++
+Shortname: P1861
+Revision: 1
+Audience: SG4, LEWG
+Status: P
+Group: WG21
+URL: http://wg21.link/P1861R1
+!Source: <a href="https://github.com/achristensen07/papers/blob/master/source/p1861r1.bs">https://github.com/achristensen07/papers/blob/master/source/p1861r1.bs</a>
+Editor: Alex Christensen, Apple, achristensen@apple.com
+Editor: JF Bastien, Apple, jfbastien@apple.com
+Editor: Scott Herscher, Apple, scott_herscher@apple.com
+Date: 2020-05-11
+No abstract: true
+Markup Shorthands: markdown yes
+</pre>
+
+Abstract {#abstract}
+========
+
+A description of how a C++ networking library can elegantly support Transport Layer Security (TLS) and Datagram Transport Layer Security (DTLS) by default, as well as allow future expansion to include protocols such as <a href="https://tools.ietf.org/html/draft-ietf-quic-transport-27">QUIC</a>.
+
+Introduction {#intro}
+===========================
+
+An interface to modern computer networks that is intended to maintain API and ABI stability must be designed for modern protocols. Indeed, networking protocols have evolved substantially since the Berkeley Socket APIs were originally created. Of utmost importance is support for security by default, as outlined in [[p1860R0]].
+
+These design principles were discussed with the Committee's networking study group, which asked the authors to what extent the <a href="https://datatracker.ietf.org/wg/taps/documents/">IETF TAPS</a> framework could be used as a basis, and what the resulting API would look like. This document presents an embodiment of TAPS into a modern C++ paradigm. We believe it also matches well with current industry practice (such as Apple’s <a href="https://developer.apple.com/documentation/network">Network.framework</a> API). As a proof of feasibility, a working implementation of this interface was written as a wrapper around Network.framework. Other implementations are possible, as discussed in [[#implementability]]. The suggested API poses very little burden on C++ Standard Library maintainers.
+
+Notable differences between this approach and the current networking proposal in [[N4771]] include:
+
+1. <a href="https://developer.apple.com/bonjour/">zero-configuration networking</a> endpoints in the `dnssd` class.
+2. The `path_monitor` class, which allows programs to receive notifications of changes in WiFi connectivity, or use of cellular data.
+3. `options` and `metadata` objects that allow configuration and reading of protocol-specific properties.
+4. A clean interface to add security by default as described in [[p1860R0]].
+
+These differences stem from following the IETF TAPS design.
+
+Additionally, this suggested API has integration with coroutines, which allows elegant asynchronous programming. Coroutines were added to C++20, it is therefore sensible to use them.
+
+The [[#api]] and be used to create a variety of applications. We offer a few examples:
+
+ * [[#client]]
+ * [[#server]]
+ * [[#pathlistener]]
+ * [[#framer]]
+
+
+Version History {#versionhistory}
+=======
+
+ * [[P1861R0]]: Minimal diff from [[N4771]] to support TLS and DTLS in a way that is not great.
+ * P1861R1: Initial suggested API based on IETF TAPS.
+
+
+Disclaimer {#disclaimer}
+===========================
+
+This paper uses `std::is_invocable_r_v` instead of concepts, and it uses `std::string_view` and `std::vector` in some places instead of ranges.
+The author was working with an incomplete implementation of C++20 at the time, and these could easily be updated in a future revision.
+It also doesn't have all the `noexcept` annotations that it could.
+Please try to look past that at the shape of an interface to the network.
+
+Suggested API {#api}
+======
+
+`net::awaitable` {#awaitable}
+-------------------
+This object is a simple template that is returned when there is a possibility of asynchrony, which allows the caller to either `co_await` the result when using coroutines or call `.then` on the result when not using coroutines.  This could probably use another awaitable type in the STL, and this is not directly related
+to networking, but networking does need a medium of asynchrony such as this.
+<pre><code>
+namespace net {
+
+template&lt;typename T&gt;
+class awaitable {
+public:
+  awaitable();
+  awaitable(const awaitable&);
+  awaitable(awaitable&&);
+  awaitable& operator=(const awaitable&);
+  awaitable& operator=(awaitable&&);
+
+  bool await_ready() const noexcept;
+  void await_suspend(std::experimental::coroutine_handle&lt;&gt;);
+  T&& await_resume();
+
+  template&lt;typename Handler, typename =
+    std::enable_if_t&lt;std::is_invocable_r_v&lt;void, Handler, T&gt;&gt;&gt;
+  void then(Handler&&);
+};
+
+}
+</code></pre>
+
+`net::buffer` {#buffer}
+-------------------
+This object represents 0 or more sections of contiguous memory used for sending and receiving data.
+<pre><code>
+namespace net {
+
+class buffer {
+public:
+  buffer();
+  buffer(const void*, size_t);
+  buffer(const char*);
+  buffer(std::string_view);
+  buffer(const buffer&);
+  buffer(buffer&&);
+  buffer& operator=(const buffer&);
+  buffer& operator=(buffer&&);
+
+  template&lt;typename Handler, typename =
+    std::enable_if_t&lt;std::is_invocable_r_v&lt;void, Handler, const uint8_t*, std::size_t&gt;&gt;&gt;
+  void get(Handler&& handler) const;
+};
+
+}
+</code></pre>
+
+`net::connection` {#connection}
+-------------------
+
+This object represents a connection with an external client or server.  This connection can be used to send or receive messages.  Note that UDP also uses connections in this model even though UDP is a "connectionless" protocol.  This object still sends and receives UDP packets even though no handshake is necessary.
+
+The `receive` method receives data even if the data is incomplete.  This is much more common on the internet, where streams of data that never complete are common.  The `receive_complete` method will only resume the awaitable when the connected peer indicates the complete method has been sent.
+
+<pre><code>
+namespace net {
+
+class connection {
+public:
+  enum class state {
+    setup,
+    waiting,
+    preparing,
+    ready,
+    failed,
+    cancelled
+  };
+
+  connection(endpoint, parameters, workqueue);
+
+  template&lt;typename Handler, typename =
+    std::enable_if_t&lt;std::is_invocable_r_v&lt;void, Handler, state, std::error_code&gt;&gt;&gt;
+  connection& on_state_changed(Handler&&);
+
+  template&lt;typename Handler, typename =
+    std::enable_if_t&lt;std::is_invocable_r_v&lt;void, Handler, bool&gt;&gt;&gt;
+  connection& on_viability_changed(Handler&&);
+
+  template&lt;typename Handler, typename =
+    std::enable_if_t&lt;std::is_invocable_r_v&lt;void, Handler, bool&gt;&gt;&gt;
+  connection& on_better_path_changed(Handler&&);
+
+  connection& start();
+
+  awaitable&lt;expected&lt;void, std::error_code&gt;&gt;
+    send(message);
+	awaitable&lt;expected&lt;void, std::error_code&gt;&gt;
+    send(const std::vector&lt;protocol::metadata&gt;&, bool is_complete = true);
+	awaitable&lt;expected&lt;void, std::error_code&gt;&gt;
+    send(buffer, const std::vector&lt;protocol::metadata&gt;&, bool is_complete = true)
+	awaitable&lt;expected&lt;void, std::error_code&gt;&gt;
+    send(buffer, message::context, bool is_complete = true)
+
+  awaitable&lt;expected&lt;message, std::error_code&gt;&gt;
+    receive_complete();
+  awaitable&lt;expected&lt;message, std::error_code&gt;&gt;
+    receive(std::size_t min_incomplete_length = 1,
+      std::size_t max_length = std::numeric_limits&lt;std::size_t&gt;::max());
+  void cancel();
+};
+
+}
+</code></pre>
+
+`net::endpoint` {#endpoint}
+-------------------
+This object represents an endpoint to be connected with.  There are currently three types: host (such as `www.apple.com`), address (such as `127.0.0.1`) and dnssd (such as a Bonjour service).  All three can be used to initiate a connection.
+<pre><code>
+namespace net {
+
+class endpoint {
+public:
+  class host;
+  class address;
+  class dnssd;
+};
+
+class endpoint::host : public endpoint {
+public:
+  host(std::string_view name, std::uint16_t port);
+};
+
+class endpoint::address : public endpoint {
+public:
+  address(const sockaddr&);
+};
+
+class endpoint::dnssd : public endpoint {
+public:
+  dnssd(std::string_view name, std::string_view type, std::string_view domain);
+};
+
+}
+</code></pre>
+
+`net::expected` {#expected}
+-------------------
+This object contains [[p0323r7]] in the `net` namespace.  It is perfect for networking, when sending can either result in nothing or an error, and receiving can either result in a message or an error. It should be standardized and its references in the connection object should be changed to use `std::expected` instead of `net::expected`.
+
+`net::interface` {#interface}
+-------------------
+This object represents a network interface, such as WiFi or ethernet.  Modern devices often have more than one such interface, and it is useful to be able to specify which one to use or to listen for events indicating when interface viability changes, such as when the WiFi is turned off but ethernet is still plugged in.
+<pre><code>
+namespace net {
+
+class interface {
+public:
+  enum class type {
+    other,
+    wifi,
+    cellular,
+    wired_ethernet,
+    loopback
+  };
+
+  interface(const interface&);
+  interface(interface&&);
+  interface& operator=(const interface&);
+  interface& operator=(interface&&);
+
+  type type() const;
+  std::string name() const;
+  std::size_t index() const;
+};
+
+}
+</code></pre>
+
+`net::listener` {#listener}
+-------------------
+This object that can be used to listen for incoming connections.  The constructor without a port receives a port assigned from the system, which can then be queried with the port getter.
+<pre><code>
+namespace net {
+
+class listener {
+public:
+  enum class state {
+    setup,
+    waiting,
+    ready,
+    failed,
+    cancelled
+  };
+
+  listener(parameters, workqueue);
+  listener(std::uint16_t port, parameters, workqueue);
+  listener(const listener&);
+  listener(listener&&);
+  listener& operator=(const listener&);
+  listener& operator=(listener&&);
+
+  template&lt;typename Handler, typename =
+    std::enable_if_t&lt;std::is_invocable_r_v&lt;void, Handler, connection&gt;&gt;&gt;
+  listener& on_new_connection(Handler&&);
+
+  template&lt;typename Handler, typename =
+    std::enable_if_t&lt;std::is_invocable_r_v&lt;void, Handler, state, std::error_code&gt;&gt;&gt;
+  listener& on_state_changed(Handler&&);
+
+  void start();
+  std::uint16_t port() const;
+};
+
+}
+
+</code></pre>
+
+`net::message::context` {#messagecontext}
+-------------------
+This object represents a set of protocol metadata associated with the act of
+sending or receiving data on a connection.
+<pre><code> 
+namespace net {
+
+class message::context {
+public:
+
+		static context final_message();
+		static context default_stream();
+		static context default_message();
+
+		context();
+
+		template&lt;typename Protocol&gt; typename Protocol::metadata metadata();
+
+		template&lt;typename Protocol&gt; const typename Protocol::metadata metadata() const;
+
+		void set_metadata(const std::vector&lt;protocol::metadata&gt;&);
+
+		bool is_final() const;
+
+		void set_is_final(bool);
+	};
+}
+</code></pre>
+
+`net::message` {#message}
+-------------------
+This object represents a message sent or received on the network. Messages have an associated context, data, and 
+a flag denoting whether this message can be considered complete (`is_complete`). Messages that are marked as complete
+will close the underlying connection if the context associated with the message is marked as final. For example, TCP
+will issue a FIN if a message is marked as complete and the context associated with the message is marked as final.
+<pre><code>
+namespace net {
+
+class message {
+public:
+  message();
+  message(buffer, bool is_complete = true);
+  message(buffer, context, bool is_complete = true)
+  message(const message&);
+  message(message&&);
+  message& operator=(const message&);
+  message& operator=(message&&);
+
+  template&lt;typename Protocol&gt;
+  typename Protocol::metadata metadata();
+  template&lt;typename Protocol&gt;
+  const typename Protocol::metadata metadata() const;
+
+  context get_context() const;
+  buffer data() const;
+  bool is_complete() const;
+};
+
+}
+</code></pre>
+
+`net::parameters` {#parameters}
+-------------------
+This object represents parameters for network protocols.
+<pre><code>
+namespace net {
+
+class parameters {
+public:
+  enum class multipath_service_type {
+    disabled,
+    handover,
+    interactive,
+    aggregate
+  };
+  enum class expired_dns_behavior {
+    system_default,
+    allow,
+    prohibit
+  };
+
+  static parameters tls();
+  static parameters dtls();
+
+  static parameters tcp();
+  static parameters udp();
+
+  parameters(protocol::security::options, protocol::tcp::options);
+  parameters(protocol::security::options, protocol::udp::options);
+
+  std::vector&lt;protocol::options&gt; application_protocols() const;
+  parameters& set_application_protocols(const std::vector&lt;protocol::options&gt;&);
+
+  interface require_interface() const;
+  parameters& set_require_interface(interface);
+
+  enum interface::type required_interface_type() const;
+  parameters& set_required_interface_type(enum interface::type);
+
+  std::vector&lt;interface&gt; prohibited_interfaces() const;
+  parameters& set_prohibited_interfaces(const std::vector&lt;interface&gt;&);
+
+  std::vector&lt;enum interface::type&gt; prohibited_interface_types() const;
+  parameters& set_prohibited_interface_types(const std::vector&lt;enum interface::type&gt;&);
+
+  bool prohibit_constrained_paths() const;
+  parameters& set_prohibit_constrained_paths(bool);
+
+  bool prefer_no_proxies() const;
+  parameters& set_prefer_no_proxies(bool);
+
+  endpoint required_local_endpoint() const;
+  parameters& set_required_local_endpoint(endpoint);
+
+  bool allow_local_endpoint_reuse() const;
+  parameters& set_allow_local_endpoint_reuse(bool);
+
+  bool accept_local_only() const;
+  parameters& set_accept_local_only(bool);
+
+  bool include_peer_to_peer() const;
+  parameters& set_include_peer_to_peer(bool);
+
+  enum multipath_service_type multipath_service_type() const;
+  parameters& set_multipath_service_type(bool);
+
+  bool allow_fast_open() const;
+  parameters& set_allow_fast_open(bool);
+
+  enum expired_dns_behavior expired_dns_behavior() const;
+  parameters& set_expired_dns_behavior(enum expired_dns_behavior);
+};
+
+}
+</code></pre>
+
+`net::path` {#path}
+-------------------
+This object represents the known information about a local interface and routes that may
+be used to send and receive data.
+<pre><code>
+namespace net {
+
+class path {
+public:
+  enum class status {
+    satisfied,
+    unsatisfied,
+    requires_connection,
+  };
+
+  path(const path&);
+  path(path&&)
+  path& operator=(const path&);
+  path& operator=(path&&);
+  bool operator==(const path&) const;
+
+  std::vector<interface> available_interfaces() const;
+  bool is_constrained() const;
+  bool has_ipv4() const;
+  bool has_ipv6() const;
+  bool has_dns() const;
+  std::vector&lt;endpoint&gt; gateways() const;
+  endpoint local_endpoint() const;
+  endpoint remote_endpoint() const;
+  bool uses_interface_type(enum interface::type type) const;
+  status status() const;
+};
+
+}
+</code></pre>
+
+`net::path_monitor` {#pathmonitor}
+-------------------
+This object can be used to listen to events related to changing network conditions.
+<pre><code>
+namespace net {
+
+class path_monitor {
+public:
+  path_monitor(workqueue queue);
+  path_monitor(enum interface::type type, workqueue queue);
+
+  template&lt;typename Handler, typename =
+    std::enable_if_t&lt;std::is_invocable_r_v&lt;void, Handler, path&gt;&gt;&gt;
+  path_monitor& on_update(Handler&&);
+};
+
+}
+</code></pre>
+
+`net::protocol` {#protocol}
+-------------------
+These objects contain the network protocol definitions, as well as their metadata and options.
+<pre><code>
+namespace net {
+
+class protocol {
+public:
+  class definition {
+  public:
+    bool operator==(const definition&) const;
+  };
+
+  class options {
+  };
+
+  class metadata {
+  protected:
+    metadata(message, definition);
+  };
+
+  class ip;
+  class tcp;
+  class udp;
+  class security;
+};
+
+class protocol::ip : public protocol {
+public:
+  static protocol::definition definition();
+
+  class options : public protocol::options {
+  public:
+    enum class version {
+      any,
+      v4,
+      v6
+    };
+
+    version version() const;
+    options& set_version(enum version);
+
+    std::uint8_t hop_limit() const;
+    options& set_hop_limit(std::uint8_t);
+
+    bool use_minimum_mtu() const;
+    options& set_use_minimum_mtu(bool);
+
+    bool disable_fragmentation() const;
+    options& set_disable_fragmentation(bool);
+
+    bool should_calculate_receive_time() const;
+    options& set_should_calculate_receive_time(bool);
+  };
+
+  enum class ecn {
+    non_ect,
+    ect0,
+    ect1,
+    ce
+  };
+
+  enum class service_class {
+    best_effort,
+    background,
+    interactive_video,
+    interactive_voice,
+    responsive_data,
+    signaling
+  };
+
+  class metadata : public protocol::metadata {
+  public:
+    metadata();
+    metadata(message);
+    metadata(const metadata&);
+    metadata(metadata&&);
+    metadata& operator=(const metadata&);
+    metadata& operator=(metadata&&);
+
+    ecn ecn() const
+    metadata& set_ecn(enum ecn);
+
+    service_class service_class() const;
+    metadata& set_service_class(enum service_class);
+
+    std::uint64_t receive_time() const;
+  };
+};
+
+class protocol::tcp : public protocol {
+public:
+  static protocol::definition definition();
+
+  class options : public protocol::options {
+  public:
+    bool no_delay() const;
+    options& set_no_delay(bool);
+
+    bool no_push() const;
+    options& set_no_push(bool);
+
+    bool no_options() const;
+    options& set_no_options(bool);
+
+    bool keep_alive() const;
+    options& set_keep_alive(bool);
+
+    std::size_t keep_alive_count() const;
+    options& set_keep_alive_count(std::size_t);
+
+    std::chrono::seconds keep_alive_idle() const;
+    options& set_keep_alive_idle(std::uint32_t);
+
+    std::chrono::seconds keep_alive_interval() const;
+    options& set_keep_alive_interval(std::chrono::seconds);
+
+    std::size_t maximum_segment_size() const;
+    options& set_maximum_segment_size(std::size_t);
+
+    std::chrono::seconds connection_timeout() const;
+    options& set_connection_timeout(std::chrono::seconds);
+
+    std::chrono::seconds persist_timeout() const;
+    options& set_persist_timeout(std::chrono::seconds);
+
+    std::chrono::seconds connection_drop_time() const;
+    options& set_connection_drop_time(std::chrono::seconds);
+
+    bool retransmit_fin_drop() const;
+    options& set_retransmit_fin_drop(bool);
+
+    bool disable_ack_stretching() const;
+    options& set_disable_ack_stretching(bool);
+
+    bool enable_fast_open() const;
+    options& set_enable_fast_open(bool);
+
+    bool disable_ecn() const;
+    options& set_disable_ecn(bool);
+  };
+
+  class metadata : protocol::metadata {
+  public:
+    std::uint32_t available_receive_buffer() const;
+    std::uint32_t available_send_buffer() const;
+  };
+};
+
+class protocol::udp : public protocol {
+public:
+  static protocol::definition definition();
+
+  class options : public protocol::options {
+  public:
+    bool prefer_no_checksum() const;
+    options& set_prefer_no_checksum(bool);
+  };
+
+  class metadata : public protocol::metadata {
+  };
+};
+
+class protocol::security : public protocol {
+public:
+  static definition definition();
+
+  class certificate {
+  public:
+    certificate();
+    certificate(std::string_view);
+    certificate(const certificate&);
+    certificate(certificate&&);
+    certificate& operator=(const certificate&);
+    certificate& operator=(certificate&&);
+
+    std::string common_name() const;
+    std::vector&lt;std::uint8_t&gt; der_bytes() const;
+    std::vector&lt;std::uint8_t&gt; public_key() const;
+  };
+
+  class identity {
+  public:
+    identity();
+    identity(const std::vector&lt;certificate&gt;&, std::string_view);
+  };
+
+  class options : public protocol::options {
+  public:
+    identity get_local_identity() const;
+    options& set_local_identity(identity);
+
+    template&lt;typename Handler, typename =
+      std::enable_if_t&lt;std::is_invocable_r_v&lt;void, Handler,
+        metadata, std::function&lt;void(bool)&gt;&gt;&gt;&gt;
+    options& on_verify(Handler, workqueue);
+  };
+
+  class metadata : public protocol::metadata {
+  public:
+    std::string_view negotiated_protocol() const;
+    bool early_data_accepted() const;
+    std::vector&lt;certificate&gt; certificate_chain() const;
+    std::string_view server_name() const;
+
+    template&lt;typename Handler, typename =
+      std::enable_if_t&lt;std::is_invocable_r_v&lt;void, Handler, buffer&gt;&gt;&gt;
+    bool oscp_response(Handler) const;
+  };
+};
+
+}
+
+#endif
+</code></pre>
+
+`net::protocol::framer` {#protocolframer}
+-------------------
+
+A framer defines a protocol in a connection's protocol stack
+that parses and writes messages on top of a transport protocol, such
+as a TCP stream. A framer can add and parse headers or delimiters around
+application data to provide a message-oriented abstraction.
+
+The framer is templated with an implementation class that must have the
+following traits:
+
+<ul>
+<li>
+<p>`class T::options`</p>
+An options class derived from `protocol::framer&lt;T&gt;` that defines protocol
+specific options
+</li><li>
+<p>`class T::metadata`</p>
+A metadata class derived from `protocol::framer&lt;T&gt;` that defines protocol
+specific metadata
+</li><li>
+<p>`start_result T::start()`</p>
+This will be called during connection establishment. Return `start_result::ready`
+to indicate that the framer instance is ready to begin sending/receiving data.
+Return `start_result::will_mark_ready` to indicate that the framer instance needs
+to complete handshaking before it is able to send/receive data. If there is no `T::start`
+it is assumed no handshake is necessary, which will behave the same as if `T::start`
+always returned `start_result::ready`.
+</li><li>
+<p>`size_t T::handle_input()`</p>
+This function will be invoked whenever new input
+data is available to be parsed. When this block is
+run, the implementation should call functions like
+`parse_input()` and `deliver_input()`.
+
+Each invocation represents new data being available
+to read from the network. This data may be insufficient
+to complete a message, or may contain multiple messages.
+Implementations are expected to try to parse messages
+in a loop until parsing fails to read enough to continue.
+
+Return a hint of the number of bytes that should be present
+before invoking this handler again. Returning 0 indicates
+that the handler should be invoked once any data is available.
+</li><li>
+<p>`void T::handle_output(net::protocol::metadata, size_t message_length, bool is_complete)`</p>
+This function will be invoked whenever an output
+message is ready to be sent. When this block is
+run, the implementation should call functions like
+`parse_output()` and `write_output()`.
+
+Each invocation represents a single complete or partial
+message that is being sent. The implementation is
+expected to write this message or let it be dropped
+in this handler.
+</li><li>
+<p>`bool T::stop()`</p>
+This function will be invoked when the connection
+is being disconnected, to allow the framer implementation
+a chance to send any final data.
+
+Return true if the framer is done and the connection
+can be fully disconnected, or false the stop should
+be delayed. If false, the implementation must later
+call `mark_failed(std::error_code)` on the instance.
+</li><li>
+<p>`void T::wakeup()`</p>
+This optional function will be invoked whenever the wakeup timer
+set via `schedule_wakeup()` fires. This is intended to
+be used for sending keepalives or other control traffic.
+</li>
+</ul>
+
+<pre><code>
+namespace net {
+
+template&lt;typename T&gt; class protocol::framer
+public:
+  enum class start_result {
+  	ready,
+  	will_mark_ready
+  };
+
+  static protocol::definition definition();
+  class options : public protocol::options {
+  public:
+  	options();
+  };
+
+  class metadata : public protocol::metadata {
+  public:
+  	metadata();
+  	metadata(framer);
+
+  	template&lt;typename Value&gt;
+    std::optional&lt;Value&gt; get_value(std::string_view key) const;
+
+  	template&lt;typename Value&gt;
+    void set_value(std::string_view key, Value);
+  };
+
+  framer();
+
+  void mark_ready();
+  void mark_failed(std::error_code);
+
+  template&lt;typename Parser, typename =
+    std::enable_if_t&lt;std::is_invocable_r_v&lt;void, Parser,
+      const void*, std::size_t, bool&gt;&gt;&gt;
+  bool parse_input(std::size_t min_length, std::size_t max_length, Parser&&);
+
+  void deliver_input(const void*, size_t, metadata, bool is_complete);
+  bool deliver_input_no_copy(size_t, metadata, bool is_complete);
+  void pass_through_input();
+
+  template&lt;typename Parser, typename =
+    std::enable_if_t&lt;std::is_invocable_r_v&lt;void, Parser,
+      const void*, std::size_t, bool&gt;&gt;&gt;
+  bool parse_output(std::size_t min_length, std::size_t max_length, Parser&&);
+
+  void write_output(const void*, std::size_t);
+  void write_output_no_copy(size_t);
+  void pass_through_output();
+  void schedule_wakeup(std::chrono::milliseconds);
+
+  template&lt;typename Handler, typename =
+    std::enable_if_t&lt;std::is_invocable_r_v&lt;void, Handler&gt;&gt;&gt;
+  void async(Handler&&);
+
+  endpoint remote_endpoint() const;
+  endpoint local_endpoint() const;
+  parameters parameters();
+  void prepend_appplication_protocol(protocol::options);
+};
+
+}
+</code></pre>
+
+`net::workqueue` {#workqueue}
+-------------------
+This object is basically an executor that works well on Apple platforms.  We should just use executor instead, but here's what this suggested API was developed with.  This is not the important part of this suggested API.
+<pre><code>
+namespace net {
+
+class workqueue {
+public:
+  static void main();
+  static workqueue main_queue();
+
+  workqueue(const workqueue&);
+  workqueue(workqueue&&);
+  workqueue& operator=(const workqueue&);
+  workqueue& operator=(workqueue&&);
+
+  template&lt;typename Work, typename =
+    std::enable_if_t&lt;std::is_invocable_r_v&lt;void, Work&gt;&gt;&gt;
+  void dispatch(Work)
+};
+
+}
+</code></pre>
+
+Examples {#examples}
+========
+
+Client {#client}
+------
+
+A simple TCP/HTTP client can be written using coroutines.  This example uses `std::lazy` from [[p1056r1]].
+
+<pre><code>
+#include &lt;iostream&gt;
+#include &lt;net&gt;
+
+std::lazy&lt;void&gt; run()
+{
+  net::workqueue queue(net::workqueue::main_queue());
+  net::endpoint::host host("www.apple.com", 80);
+  net::connection connection(host, net::parameters::tcp(), queue);
+  connection.start();
+
+  std::cout &lt;&lt; "Sending request" &lt;&lt; std::endl;
+  net::message message(net::buffer("GET / HTTP/1.1\r\nHost: www.apple.com\r\n\r\n"));
+  auto sendResult = co_await connection.send(message);
+  if (!sendResult) {
+    std::cerr &lt;&lt; "failed to send request" &lt;&lt; std::endl;
+    co_return;
+  }
+
+  std::cout &lt;&lt; "Sent request, waiting for response" &lt;&lt; std::endl;
+  auto message = co_await connection.receive();
+  if (!message) {
+    std::cerr &lt;&lt; "failed to receive response" &lt;&lt; std::endl;
+    co_return;
+  }
+
+  std::cout &lt;&lt; "Received response" &lt;&lt; std::endl;
+  message-&gt;data().get([](const uint8_t *bytes, std::size_t size) {
+    std::cout &lt;&lt; std::string(reinterpret_cast&lt;const char *&gt;(bytes), size);
+  });
+  std::cout &lt;&lt; std::endl;
+  co_return;
+}
+
+int main(int, char**)
+{
+  auto lazy = run();
+  net::workqueue::main();
+}
+</code></pre>
+All that is needed to make the request use TLS is to change `net::parameters::tcp()` to `net::parameters::tls()`.  Port 80 should also be changed to port 443 for this particular server.
+
+Server {#server}
+------
+
+Using this suggested API, one can make a simple TCP/HTTP server as follows:
+
+<pre><code>
+#include &lt;iostream&gt;
+#include &lt;net&gt;
+
+int main(int, char**)
+{
+  net::parameters listener_parameters = net::parameters::tcp();
+
+  net::listener listener(listener_parameters, net::workqueue::main_queue());
+  listener.on_new_connection([] (auto connection) {
+    std::cout &lt;&lt; "Received new connection from a client!" &lt;&lt; std::endl;
+    connection.start();
+
+    connection.receive().then([connection] (auto request) mutable {
+      if (!request) {
+        std::cerr &lt;&lt; "Failed to receive request" &lt;&lt; std::endl;
+        return;
+      }
+
+      std::cout &lt;&lt; "Received request:" &lt;&lt; std::endl;
+      request-&gt;data().get([](const uint8_t *bytes, std::size_t size) {
+        std::cout &lt;&lt; std::string(reinterpret_cast&lt;const char *&gt;(bytes), size);
+      });
+      std::cout &lt;&lt; std::endl;
+
+      std::cout &lt;&lt; "Sending response" &lt;&lt; std::endl;
+      net::buffer buffer(
+        "HTTP/1.1 200 OK\r\nContent-Length: 23\r\n\r\n"
+        "The server says hello!\n"
+      );
+      connection.send(net::message(buffer)).then([] (auto result) {
+        if (!result) {
+          std::cerr &lt;&lt; "Failed to send response" &lt;&lt; std::endl;
+          return;
+        }
+        std::cout &lt;&lt; "Successfully sent response" &lt;&lt; std::endl;
+      });
+    });
+  });
+
+  listener.on_state_changed([listener](auto state, auto error) {
+    if (!error && state == net::listener::state::ready) {
+      std::cout &lt;&lt; "server is now ready and listening. ";
+      std::cout &lt;&lt; "curl http://127.0.0.1:" &lt;&lt; listener.port();
+      std::cout &lt;&lt; "/ -v" &lt;&lt; std::endl;
+    }
+  });
+
+  listener.start();
+
+  net::workqueue::main();
+}
+</code></pre>
+
+Which can be changed into a TLS server by adding these lines after the declaration of `listener_parameters`:
+
+<pre><code>
+  // This is a test RSA private key from BoringSSL.
+  auto rsa_private_key = base64_decode(
+    "MIICXgIBAAKBgQDYK8imMuRi/03z0K1Zi0WnvfFHvwlYeyK9Na6XJYaUoIDAtB92"
+    "kWdGMdAQhLciHnAjkXLI6W15OoV3gA/ElRZ1xUpxTMhjP6PyY5wqT5r6y8FxbiiF"
+    "KKAnHmUcrgfVW28tQ+0rkLGMryRtrukXOgXBv7gcrmU7G1jC2a7WqmeI8QIDAQAB"
+    "AoGBAIBy09Fd4DOq/Ijp8HeKuCMKTHqTW1xGHshLQ6jwVV2vWZIn9aIgmDsvkjCe"
+    "i6ssZvnbjVcwzSoByhjN8ZCf/i15HECWDFFh6gt0P5z0MnChwzZmvatV/FXCT0j+"
+    "WmGNB/gkehKjGXLLcjTb6dRYVJSCZhVuOLLcbWIV10gggJQBAkEA8S8sGe4ezyyZ"
+    "m4e9r95g6s43kPqtj5rewTsUxt+2n4eVodD+ZUlCULWVNAFLkYRTBCASlSrm9Xhj"
+    "QpmWAHJUkQJBAOVzQdFUaewLtdOJoPCtpYoY1zd22eae8TQEmpGOR11L6kbxLQsk"
+    "aMly/DOnOaa82tqAGTdqDEZgSNmCeKKknmECQAvpnY8GUOVAubGR6c+W90iBuQLj"
+    "LtFp/9ihd2w/PoDwrHZaoUYVcT4VSfJQog/k7kjE4MYXYWL8eEKg3WTWQNECQQDk"
+    "104Wi91Umd1PzF0ijd2jXOERJU1wEKe6XLkYYNHWQAe5l4J4MWj9OdxFXAxIuuR/"
+    "tfDwbqkta4xcux67//khAkEAvvRXLHTaa6VFzTaiiO8SaFsHV3lQyXOtMrBpB5jd"
+    "moZWgjHvB2W9Ckn7sDqsPB+U2tyX0joDdQEyuiMECDY8oQ=="
+  );
+  
+  // This is a test self-signed certificate from BoringSSL.
+  auto certificate_bytes = base64_decode(
+    "MIICWDCCAcGgAwIBAgIJAPuwTC6rEJsMMA0GCSqGSIb3DQEBBQUAMEUxCzAJBgNV"
+    "BAYTAkFVMRMwEQYDVQQIDApTb21lLVN0YXRlMSEwHwYDVQQKDBhJbnRlcm5ldCBX"
+    "aWRnaXRzIFB0eSBMdGQwHhcNMTQwNDIzMjA1MDQwWhcNMTcwNDIyMjA1MDQwWjBF"
+    "MQswCQYDVQQGEwJBVTETMBEGA1UECAwKU29tZS1TdGF0ZTEhMB8GA1UECgwYSW50"
+    "ZXJuZXQgV2lkZ2l0cyBQdHkgTHRkMIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKB"
+    "gQDYK8imMuRi/03z0K1Zi0WnvfFHvwlYeyK9Na6XJYaUoIDAtB92kWdGMdAQhLci"
+    "HnAjkXLI6W15OoV3gA/ElRZ1xUpxTMhjP6PyY5wqT5r6y8FxbiiFKKAnHmUcrgfV"
+    "W28tQ+0rkLGMryRtrukXOgXBv7gcrmU7G1jC2a7WqmeI8QIDAQABo1AwTjAdBgNV"
+    "HQ4EFgQUi3XVrMsIvg4fZbf6Vr5sp3Xaha8wHwYDVR0jBBgwFoAUi3XVrMsIvg4f"
+    "Zbf6Vr5sp3Xaha8wDAYDVR0TBAUwAwEB/zANBgkqhkiG9w0BAQUFAAOBgQA76Hht"
+    "ldY9avcTGSwbwoiuIqv0jTL1fHFnzy3RHMLDh+Lpvolc5DSrSJHCP5WuK0eeJXhr"
+    "T5oQpHL9z/cCDLAKCKRa4uV0fhEdOWBqyR9p8y5jJtye72t6CuFUV5iqcpF4BH4f"
+    "j2VNHwsSrJwkD4QUGlUtH7vwnQmyCFxZMmWAJg=="
+  );
+
+  net::protocol::security::certificate certificate(certificate_bytes);
+  net::protocol::security::identity identity({ certificate }, rsa_private_key);
+  net::protocol::security::options tls_options;
+  tls_options.set_local_identity(identity);
+  listener_parameters.set_application_protocols({ tls_options });
+</code></pre>
+
+`http` would need to be changed to `https` and `-v` would need to be changed to `-v --insecure` to allow curl to connect to this server successfully.
+It requires curl's `insecure` flag because it uses a self-signed certificate instead of a certificate chain with a trusted root certificate authority. This is useful for local development, but obviously requires a certificate for production usage.
+
+Path Listener {#pathlistener}
+-------------
+
+This is one of the great advantages of this suggested API.  It allows people to write programs that are common today but unheard of in the 1980's when sockets were designed.
+
+<pre><code>
+#include &lt;iostream&gt;
+#include &lt;net&gt;
+
+std::ostream& operator&lt;&lt;(std::ostream& os, const net::path& path)
+{
+  for (auto& interface : path.available_interfaces())
+    os &lt;&lt; "interface: " &lt;&lt; interface.name() &lt;&lt; std::endl;
+  return os;
+}
+
+int main(int, char **)
+{
+  net::path_monitor monitor(net::workqueue::main_queue());
+  monitor.on_update([](auto path) {
+    std::cout &lt;&lt; "path update: " &lt;&lt; std::endl &lt;&lt; path;
+  });
+
+  net::workqueue::main();
+}
+</code></pre>
+This simple program will print status updates when the network interfaces changes, such as when WiFi is connected or when a mobile device enters an area
+without cellular data availability.
+
+Protocol Framer {#framer}
+---------------
+
+This is an implementation of a subset of HTTP.  It allows setting method, path, and header fields of HTTP requests, and it parses the response header all as one string in the metadata and the passes the body through to `connection.receive()`.  This example also uses `std::lazy` from [[p1056r1]].
+<pre><code>
+#include &lt;net&gt;
+#include &lt;stdio.h&gt;
+#include &lt;unordered_map&gt;
+#include &lt;sstream&gt;
+
+class http {
+public:
+  using framer = net::protocol::framer&lt;http&gt;;
+
+  enum class method { get, post };
+
+  enum class response_parsing_state {
+    looking_for_first_carriage_return,
+    looking_for_first_newline,
+    looking_for_second_carriage_return,
+    looking_for_second_newline,
+    body
+  };
+
+  static std::string_view label() { return "http"; }
+  static net::protocol::definition definition() { return framer::definition(); }
+  class options : public framer::options { };
+
+  class metadata : public framer::metadata {
+  public:
+    using framer::metadata::metadata;
+
+    std::string path() const
+    {
+      if (auto value = get_value&lt;std::string&gt;("path"))
+        return std::move(*value);
+      return "/";
+    }
+    metadata& set_path(std::string path)
+    {
+      set_value("path", path);
+      return *this;
+    }
+
+    method method() const
+    {
+      if (auto value = get_value&lt;enum method&gt;("method"))
+        return std::move(*value);
+      return method::get;
+    }
+    metadata& set_method(enum method method)
+    {
+      set_value("method", method);
+      return *this;
+    }
+    
+    using header_fields_t = std::unordered_map&lt;std::string, std::string&gt;;
+    header_fields_t header_fields() const
+    {
+      if (auto value = get_value&lt;header_fields_t&gt;("header_fields"))
+        return std::move(*value);
+      return { };
+    }
+    metadata& set_header_fields(header_fields_t fields)
+    {
+      set_value("header_fields", fields);
+      return *this;
+    }
+
+    std::string response_header() const
+    {
+      if (auto value = get_value&lt;std::string&gt;("response_header"))
+        return std::move(*value);
+      return { };
+    }
+    metadata& set_response_header(std::string header)
+    {
+      set_value("response_header", header);
+      return *this;
+    }
+  };
+
+  http(framer framer) : m_framer(std::move(framer)) { }
+
+  size_t handle_input();
+
+  void handle_output(net::protocol::metadata, size_t, bool);
+
+private:
+  framer m_framer;
+  response_parsing_state m_state {
+    response_parsing_state::looking_for_first_carriage_return
+  };
+
+  metadata m_response_metadata;
+  std::ostringstream m_response_header_stream;
+};
+
+size_t http::handle_input()
+{
+  auto ok = m_framer.parse_input(1, std::numeric_limits&lt;size_t&gt;::max(),
+    [&](const void *buffer, size_t length, bool is_complete) -&gt; size_t {
+    // "\r\n\r\n" indicates the end of the header and beginning of body,
+    // which we want to deliver. This is just a state machine looking for that,
+    // which may be in two different input pieces.
+    const char* char_buffer = static_cast&lt;const char*&gt;(buffer);
+    for (size_t i = 0; i &lt; length; ++i) {
+      char c = char_buffer[i];
+      m_response_header_stream &lt;&lt; c;
+      switch (m_state) {
+        case response_parsing_state::looking_for_first_carriage_return:
+          if (c == '\r')
+            m_state = response_parsing_state::looking_for_first_newline;
+          break;
+        case response_parsing_state::looking_for_first_newline:
+          if (c == '\n')
+            m_state = response_parsing_state::looking_for_second_carriage_return;
+          else
+            m_state = response_parsing_state::looking_for_first_carriage_return;
+          break;
+        case response_parsing_state::looking_for_second_carriage_return:
+          if (c == '\r')
+            m_state = response_parsing_state::looking_for_second_newline;
+          else
+            m_state = response_parsing_state::looking_for_first_carriage_return;
+          break;
+        case response_parsing_state::looking_for_second_newline:
+          if (c == '\n') {
+            m_state = response_parsing_state::body;
+            m_response_metadata.set_response_header(m_response_header_stream.str());
+          } else
+            m_state = response_parsing_state::looking_for_first_carriage_return;
+          break;
+        case response_parsing_state::body:
+          m_framer.deliver_input(
+            char_buffer + i,
+            length - i,
+            m_response_metadata,
+            is_complete
+          );
+          return length;
+      }
+    }
+    return length;
+  });
+
+  if (!ok)
+    m_framer.mark_failed(make_error_code(std::errc::protocol_error));
+
+  return 0;
+}
+
+void handle_output(
+  net::protocol::metadata metadata,
+  size_t message_length,
+  bool is_complete)
+{
+  auto method_string = [] (auto method) {
+    switch (method) {
+    case method::get:
+      return "GET";
+    case method::post:
+      return "POST";
+    }
+  };
+
+  auto http_metadata = dynamic_cast&lt;const http::metadata&&gt;(metadata);
+  std::ostringstream os;
+  os &lt;&lt; method_string(http_metadata.method())
+    &lt;&lt; " " &lt;&lt; http_metadata.path() &lt;&lt; " HTTP/1.1\r\n";
+
+  auto header_fields = http_metadata.header_fields();
+  for (auto& kv : header_fields)
+      os &lt;&lt; kv.first &lt;&lt; ": " &lt;&lt; kv.second &lt;&lt; "\r\n";
+  os &lt;&lt; "\r\n";
+
+  auto header = os.str();
+  m_framer.write_output(
+    reinterpret_cast&lt;const uint8_t *&gt;(header.c_str()), header.size());
+}
+
+std::lazy&lt;void&gt; run()
+{
+  net::parameters parameters(net::parameters::tcp());
+  parameters.set_application_protocols({
+    net::protocol::security::options(),
+    http::options()
+  });
+  net::connection connection(
+    net::endpoint::host("www.apple.com", 443),
+    parameters,
+    net::workqueue::main_queue()
+  );
+  connection.start();
+  std::cout &lt;&lt; "Sending request" &lt;&lt; std::endl;
+  http::metadata http_metadata;
+  http_metadata.set_method(http::method::get).set_path("/").set_header_fields({
+    { "Host", "www.apple.com" },
+    { "Connection", "Close" }
+  });
+  auto sendResult = co_await connection.send({ http_metadata });
+  if (!sendResult) {
+    std::cerr &lt;&lt; "failed to send request" &lt;&lt; std::endl;
+    co_return;
+  }
+  std::cout &lt;&lt; "Sent request, waiting for response" &lt;&lt; std::endl;
+  auto message = co_await connection.receive();
+  if (!message) {
+    std::cerr &lt;&lt; "failed to receive response" &lt;&lt; std::endl;
+    co_return;
+  }
+  auto received_metadata = message-&gt;metadata&lt;http&gt;();
+  std::cout &lt;&lt; "http response header:" &lt;&lt; std::endl;
+  std::cout &lt;&lt; received_metadata.response_header() &lt;&lt; std::endl;
+  std::cout &lt;&lt; "http response body:" &lt;&lt; std::endl;
+  message-&gt;data().get([](const uint8_t *bytes, std::size_t size) {
+    std::cout &lt;&lt;
+      std::string(reinterpret_cast&lt;const char *&gt;(bytes), size)
+      &lt;&lt; std::endl;
+  });
+  co_return;
+}
+
+int main(int, char**)
+{
+  auto lazy = run();
+  net::workqueue::main();
+  return 0;
+}
+</pre></code>
+
+
+Notes {#notes}
+=======
+
+Identities consisting of certificate chains and private keys are commonly used, but there are also things like hardware keys which sign data upon request but never allow access to the private key.  This will need to be developed further to support such devices.
+
+TLS version and cipher suite are intentionally not exposed because they would not allow crypto agility without breaking ABI.  Users who need such control will have to implement their own TLS on top of TCP or DTLS on top of UDP.
+
+Relatedly, the allowance for custom transport and application protocols has not yet been included but can.  It is tricky to do so without mandating interitance from STL types, which would be undesirable.
+
+The storage mechanism on `framer::metadata` is not optimal because it requires a string key to set or access its values.  Don't let that be a distraction from the design of `framer` allowing implementation of custom protocols.
+
+
+Implementability {#implementability}
+=======
+
+We implemented the suggested API using Apple's <a href="https://developer.apple.com/documentation/network">Network.framework</a> API, available on iOS and macOS. This implementation currently stands at 2350 lines of code (without counting `std::expected`). All examples function as described.
+
+Undue implementation burden was a severe concern in the Committee, particularly when it comes to the cryptography used in modern secure networking protocols. Our implementation needs little to no experience with cryptography. Indeed, the implementation simply needs to wrap existing APIs. Our experience makes us confident that modern operating systems and userspace libraries are more than adequate to implement this suggested API fully.
+
+Much of this can be implemented on top of the Berkeley Sockets API. It's merely a different shape for the API with the important addition of metadata, which provides a mechanism to configure protocol properties in a way that can be elegantly extended to protocols with security in the transport layer, such as QUIC.
+
+The `path_monitor` class requires OS support that many operating systems already have internally.

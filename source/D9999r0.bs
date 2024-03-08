@@ -1,0 +1,120 @@
+<pre class='metadata'>
+Title: Forward declaration of nested classes
+Shortname: P9999
+Revision: 0
+Audience: EWG
+Status: P
+Group: WG21
+URL: https://wg21.link/P9999R0
+!Source: <a href="https://github.com/achristensen07/papers/blob/main/source/P9999r0.bs">https://github.com/achristensen07/papers/blob/main/source/P9999r0.bs</a>
+Editor: Alex Christensen, Apple, achristensen@apple.com
+Abstract: A description of the effects of adding forward declaration of nested classes to the C++ language.
+Date: 2023-12-20
+Markup Shorthands: markdown yes
+</pre>
+
+Introduction {#intro}
+===========================
+
+<a href='https://wg21.link/P0289'>P0289</a> was discussed in Jacksonville in 2016, and there was general support for the idea in the room.  It left some unanswered questions, and there was not clear consensus on how to handle some possibly-invalid code.  This paper further develops this discussion, draws analogies to existing forward declaration behavior, and suggests a path forward.
+
+Revision History
+==========
+* r0 Initial version.
+
+Motivation: compile speed {#compilespeed}
+===========================
+
+If a nested class is used outside of the context of its nesting class, then there is no way to compile the code successfully without including headers that would otherwise be unnecessary, which slows down compile times.  Unfortunately, in some projects this results in <a href='https://devtalk.blender.org/t/speed-up-c-compilation/30508#:~:text=Nested%20C%2B%2B%20structs%20are%20impossible%20to%20forward%20declare'>discouraging use of nested classes</a> or <a href='ADD LINK HERE'>migrating good use of nested classes to non-nested classes</a> to avoid paying this penalty.  Modules have somewhat but not completely solved this problem.
+
+Motivation: language expression {#languageexpression}
+===========================
+
+Consider the example of two classes representing images in different encodings that can create handles and transcode to each other:
+
+<xmp>
+class JPGEncodedImageHandle;
+
+class PNGEncodedImage {
+public:
+    static PNGEncodedImage transcode(JPGEncodedImageHandle);
+    class Handle;
+    Handle makeHandle() const;
+};
+
+class JPGEncodedImage {
+public:
+    static JPGEncodedImage transcode(PNGEncodedImage::Handle);
+    using Handle = JPGEncodedImageHandle;
+    Handle makeHandle() const;
+};
+</xmp>
+
+There is currently no way to express this in a symmetric way while still properly using nested classes.  If forward declarations of nested classes were added, we would be able to express this in a more elegant way:
+
+<xmp>
+// PNGEncodedImage.h
+class JPGEncodedImage;
+class JPGEncodedImage::Handle;
+
+class PNGEncodedImage {
+public:
+    static PNGEncodedImage transcode(JPGEncodedImage::Handle);
+    class Handle;
+    Handle makeHandle() const;
+};
+</xmp>
+<xmp>
+// JPGEncodedImage.h
+class PNGEncodedImage;
+class PNGEncodedImage::Handle;
+
+class JPGEncodedImage {
+public:
+    static JPGEncodedImage transcode(PNGEncodedImage::Handle);
+    class Handle;
+    Handle makeHandle() const;
+};
+</xmp>
+
+Suggestion of how to handle nested enum classes {#enumclasses}
+===========================
+
+This is not limited to nested structs and classes.  <a href='ADD LINK HERE'>Nested enum classes</a> are also a source of the same motivation to do this.  Probably more.  We should do something like this:
+<xmp>
+class Image;
+enum class Image::Type : uint8_t;
+</xmp>
+
+Suggestion of how to handle bullet 1:
+===========================
+
+Suggestion of how to handle bullet 2:
+===========================
+
+Suggestion of how to handle bullet 3:
+===========================
+
+Suggestion of how to handle one issue they didn't think of:
+===========================
+
+"can you have class X derive from the incomplete class X::A"
+"ill-formed if the nested class is a private member"?  no
+"Access checking is done on template arguments, yes?"
+
+What about template classes? struct S<T>::A?
+
+Proposed Wording {#word}
+===========================
+I'll add some standardese here in a future revision if EWG continues to think this is a good idea.
+
+Modify 9.2.9.4 of n4928? too general
+11.3 also has some introduction to names that is relevant.
+11.1 is probably where the main modification needs to go.
+11.4.10 also?
+11.4.11 too
+11.8 mentions "declaration set" which I should look for elsewhere but not modify
+6.2 is where declarations are defined <-- CHANGE HERE PROBABLY
+
+dcl.dcl <-- CHANGE HERE
+9.3
